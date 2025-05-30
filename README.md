@@ -1,8 +1,10 @@
 # Dfns Smart Account
 
 This smart contract is heavily inspired from the SafeLite example: https://github.com/5afe/safe-eip7702/blob/main/safe-eip7702-contracts/contracts/experimental/SafeLite.sol
-It was stripped from all unecessary logic to only keep the batch functionality.
-It uses no dependency and rely on some assembly code to save gas usage.
+It was stripped from all unnecessary logic to only keep the batch functionality.
+It uses no dependency and relies on some assembly code to save gas usage.
+
+The contract is intended to be used with EIP-7702 where EOA delegates to this contract implementation.
 
 ## Foundry
 
@@ -24,66 +26,327 @@ https://book.getfoundry.sh/
 ### Build
 
 ```shell
-$ forge build
+forge build
 ```
 
 ### Test
 
 ```shell
-$ forge test
+# Run all tests
+forge test
+
+# Run unit tests
+forge test --match-contract DfnsSmartAccountUnitTest
+
+# Run integrated tests with Holesky fork
+forge test --match-contract IntegratedTest --fork-url https://ethereum-holesky-rpc.publicnode.com
+
+# Run fuzz tests
+forge test --match-contract FuzzTestingDfnsSmartAccount
+
+# Run tests with gas reports
+forge test --gas-report
 ```
 
 ### Format
 
 ```shell
-$ forge fmt
+forge fmt
 ```
 
 ### Gas Snapshots
 
 ```shell
-$ forge snapshot
+forge snapshot
 ```
 
-### Anvil
+## Deployment and Usage Guide
+
+### Step 1: Deploy the Contract
+
+Deploy the DfnsSmartAccount contract to your target network:
 
 ```shell
-$ anvil
+# Deploy to Holesky testnet
+## 1. for test 
+forge create src/DfnsSmartAccount.sol:DfnsSmartAccount \
+    --rpc-url https://ethereum-holesky-rpc.publicnode.com \
+    --private-key <your_private_key> \
+    --verify \
+    --etherscan-api-key <your_etherscan_api_key>
+
+# Deploy to local Anvil
+forge create src/DfnsSmartAccount.sol:DfnsSmartAccount \
+    --rpc-url http://localhost:8545 \
+    --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+
+# Deploy using script (recommended)
+forge script script/DeployDfnsSmartAccount.sol:DeployDfnsSmartAccount \
+    --rpc-url <your_rpc_url> \
+    --private-key <your_private_key> \
+    --broadcast \
+    --verify
 ```
 
-### Deploy
+**Example successful deployment output:**
+```
+Deployer: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+Deployed to: 0x5FbDB2315678afecb367f032d93F642f64180aa3
+Transaction hash: 0x...
+```
+
+### Step 2: Set Up EIP-7702 Delegation (Using Forge)
+
+Create an EIP-7702 delegation from your EOA to the deployed smart contract:
 
 ```shell
-$ forge create script/DfnsSmartAccount.sol:DfnsSmartAccount --rpc-url <your_rpc_url> --private-key <your_private_key>
+# Set environment variables
+export SMART_ACCOUNT_ADDRESS=0x5FbDB2315678afecb367f032d93F642f64180aa3
+export EOA_PRIVATE_KEY=0x59c6995e998f97436f5a7c3e6b3b3d2c8e6c3d6c8e6c3d6c8e6c3d6c8e6c3d6c
+export RPC_URL=https://ethereum-holesky-rpc.publicnode.com
+
+# Create delegation authorization tuple
+cast call $SMART_ACCOUNT_ADDRESS "getNonce()" --rpc-url $RPC_URL
+
+# Get EOA address from private key
+cast wallet address $EOA_PRIVATE_KEY
+# Output: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+
+# Sign delegation (this creates the authorization tuple for EIP-7702)
+# Note: This is done through transaction inclusion in EIP-7702
 ```
 
-copy the input, and use the Dfns API to broadcast the transaction:
+### Step 3: Build User Operations
 
-`https://{{customerApiDomain}}/wallets/:walletId/transactions`
-
-```json
-{
-  "kind": "Json",
-  "transaction": {
-    "data": "0x60a0604052348015600e575f5ffd5b506080516107066100245f395f50506107065ff3fe608060405260043610610028575f3560e01c806374fa41211461002c578063d087d28814610048575b5f5ffd5b61004660048036038101906100419190610473565b610072565b005b348015610053575f5ffd5b5061005c610200565b60405161006991906104ee565b60405180910390f35b5f61007b610211565b90505f815f015490505f7f47e79534a245952e8b16893a336b85a3d9ea9fa8c573f3d803afb92a794692185f1b46306040516020016100bc9392919061055e565b6040516020818303038152906040528051906020012090505f7f4f8bb4631e6552ac29b9d6bacf60ff8b5481e2af7c2104fe0261045fa69881115f1b87805190602001208460405160200161011393929190610593565b6040516020818303038152906040528051906020012090505f828260405160200161013f92919061063c565b604051602081830303815290604052805190602001209050610162818888610238565b610198576040517f8baa579f00000000000000000000000000000000000000000000000000000000815260040160405180910390fd5b60018401855f0181905550875160205b818110156101f457808a015160601c601482018b0151603483018c0151605484018d015f5f838386885af15f81036101e2573d5f5f3e3d5ffd5b826054018601955050505050506101a8565b50505050505050505050565b5f610209610211565b5f0154905090565b5f7f10ee8db8a0021e326896fcf9b44ce61becefe5f52e3dfd0bb294aee9b73bc000905090565b5f5f601b60ff84901c0190505f7f7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8416905060018683875f1b845f1b6040515f8152602001604052604051610290949392919061068d565b6020604051602081039080840390855afa1580156102b0573d5f5f3e3d5ffd5b5050506020604051035173ffffffffffffffffffffffffffffffffffffffff163073ffffffffffffffffffffffffffffffffffffffff1614925050509392505050565b5f604051905090565b5f5ffd5b5f5ffd5b5f5ffd5b5f5ffd5b5f601f19601f8301169050919050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52604160045260245ffd5b6103528261030c565b810181811067ffffffffffffffff821117156103715761037061031c565b5b80604052505050565b5f6103836102f3565b905061038f8282610349565b919050565b5f67ffffffffffffffff8211156103ae576103ad61031c565b5b6103b78261030c565b9050602081019050919050565b828183375f83830152505050565b5f6103e46103df84610394565b61037a565b905082815260208101848484011115610400576103ff610308565b5b61040b8482856103c4565b509392505050565b5f82601f83011261042757610426610304565b5b81356104378482602086016103d2565b91505092915050565b5f819050919050565b61045281610440565b811461045c575f5ffd5b50565b5f8135905061046d81610449565b92915050565b5f5f5f6060848603121561048a576104896102fc565b5b5f84013567ffffffffffffffff8111156104a7576104a6610300565b5b6104b386828701610413565b93505060206104c48682870161045f565b92505060406104d58682870161045f565b9150509250925092565b6104e881610440565b82525050565b5f6020820190506105015f8301846104df565b92915050565b5f819050919050565b61051981610507565b82525050565b5f73ffffffffffffffffffffffffffffffffffffffff82169050919050565b5f6105488261051f565b9050919050565b6105588161053e565b82525050565b5f6060820190506105715f830186610510565b61057e60208301856104df565b61058b604083018461054f565b949350505050565b5f6060820190506105a65f830186610510565b6105b36020830185610510565b6105c060408301846104df565b949350505050565b5f81905092915050565b7f19010000000000000000000000000000000000000000000000000000000000005f82015250565b5f6106066002836105c8565b9150610611826105d2565b600282019050919050565b5f819050919050565b61063661063182610507565b61061c565b82525050565b5f610646826105fa565b91506106528285610625565b6020820191506106628284610625565b6020820191508190509392505050565b5f60ff82169050919050565b61068781610672565b82525050565b5f6080820190506106a05f830187610510565b6106ad602083018661067e565b6106ba6040830185610510565b6106c76060830184610510565b9594505050505056fea2646970667358221220183bdad4d5eb41321768cef7a758bbf3df56dae565a5070e0f36300aa08f27c664736f6c634300081d0033"
-  }
-}
-```
+#### Single Transaction Example
 
 ```shell
-forge verify-contract 0xbd77a32e628e69d8b168d3813f019e51d787b569 ./src/DfnsSmartAccount.sol:DfnsSmartAccount --verifier-url https://api-holesky.etherscan.io/api --etherscan-api-key <etherscan-private-key> --watch
+# Build a single ETH transfer operation
+# Format: to(20 bytes) + value(32 bytes) + dataLength(32 bytes) + data(variable)
+
+# Transfer 1 ETH to recipient
+export RECIPIENT=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+export TRANSFER_AMOUNT=1000000000000000000  # 1 ETH in wei
+
+# Create user operation (hex encoded)
+# Recipient address (20 bytes): 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+# Value (32 bytes): 0x0de0b6b3a7640000 (1 ETH)
+# Data length (32 bytes): 0x00000000000000000000000000000000000000000000000000000000000000000 (0 bytes)
+# Data: (empty)
+
+export SINGLE_USER_OPS="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000000"
 ```
 
-### Cast
+#### Batch Transaction Example
 
 ```shell
-$ cast <subcommand>
+# Build batch operations (ETH transfer + contract call)
+export RECIPIENT_1=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+export RECIPIENT_2=0x90F79bf6EB2c4f870365E785982E1f101E93b906
+export TOKEN_ADDRESS=0x... # Your ERC20 token address
+
+# Operation 1: Send 0.5 ETH to recipient1
+# Operation 2: Send 1 ETH to recipient2
+export BATCH_USER_OPS="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC00000000000000000000000000000000000000000000000006f05b59d3b2000000000000000000000000000000000000000000000000000000000000000000000090F79bf6EB2c4f870365E785982E1f101E93b9060000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000000"
 ```
+
+### Step 4: Generate EIP-712 Signature
+
+```shell
+# Generate EIP-712 signature for the user operations
+# This requires creating the domain separator and struct hash
+
+# Get contract nonce
+export NONCE=$(cast call $SMART_ACCOUNT_ADDRESS "getNonce()" --rpc-url $RPC_URL)
+
+# Create domain separator
+# DOMAIN_TYPEHASH = keccak256("EIP712Domain(uint256 chainId,address verifyingContract)")
+# For EIP-7702, verifyingContract is the EOA address (delegating address)
+export EOA_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+export CHAIN_ID=17000  # Holesky
+
+# Create struct hash
+# HANDLEOPS_TYPEHASH = keccak256("HandleOps(bytes32 data,uint256 nonce)")
+
+# Sign the EIP-712 message
+cast wallet sign --data "..." --private-key $EOA_PRIVATE_KEY
+```
+
+### Step 5: Execute handleOps
+
+```shell
+# Execute the user operations with signature
+cast send $SMART_ACCOUNT_ADDRESS \
+    "handleOps(bytes,uint256,uint256)" \
+    $SINGLE_USER_OPS \
+    $SIGNATURE_R \
+    $SIGNATURE_VS \
+    --rpc-url $RPC_URL \
+    --private-key $EOA_PRIVATE_KEY \
+    --gas-limit 500000
+
+# Verify execution
+cast call $SMART_ACCOUNT_ADDRESS "getNonce()" --rpc-url $RPC_URL
+# Should return incremented nonce
+
+# Check recipient balance
+cast balance $RECIPIENT --rpc-url $RPC_URL
+```
+
+### Step 6: Complete Example Script
+
+Create a complete example script:
+
+```bash
+#!/bin/bash
+# complete_example.sh
+
+# Deploy contract
+echo "Deploying DfnsSmartAccount..."
+DEPLOYMENT_OUTPUT=$(forge create src/DfnsSmartAccount.sol:DfnsSmartAccount \
+    --rpc-url http://localhost:8545 \
+    --private-key "<<your private key>>")
+
+CONTRACT_ADDRESS=$(echo "$DEPLOYMENT_OUTPUT" | grep "Deployed to:" | cut -d' ' -f3)
+echo "Contract deployed to: $CONTRACT_ADDRESS"
+
+# Set up variables
+EOA_PRIVATE_KEY=""
+RECIPIENT=""
+
+# Check initial balances
+echo "Initial balances:"
+echo "EOA: $(cast balance 0x70997970C51812dc3A010C7d01b50e0d17dc79C8)"
+echo "Recipient: $(cast balance $RECIPIENT)"
+
+# Create user operation (1 ETH transfer)
+USER_OPS="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC0000000000000000000000000000000000000000000000000de0b6b3a76400000000000000000000000000000000000000000000000000000000000000000000"
+
+# Note: In a real implementation, you would:
+# 1. Set up EIP-7702 delegation through transaction inclusion
+# 2. Generate proper EIP-712 signature
+# 3. Execute handleOps from the delegated EOA
+
+echo "User operations created: $USER_OPS"
+echo "Ready for EIP-7702 delegation and execution"
+```
+
+### Testing with Anvil
+
+```shell
+# Start Anvil with EIP-7702 support
+anvil --hardfork prague
+
+# Run the complete example
+chmod +x complete_example.sh
+./complete_example.sh
+```
+
+## Advanced Usage
+
+### Custom Batch Operations
+
+```shell
+# Create complex batch with contract interactions
+# Example: Approve + Transfer tokens in one batch
+
+# Operation 1: Approve tokens
+# target: token_address, value: 0, data: approve(spender, amount)
+# Operation 2: Transfer tokens  
+# target: token_address, value: 0, data: transfer(to, amount)
+
+# Use cast to encode function calls
+APPROVE_DATA=$(cast calldata "approve(address,uint256)" $SPENDER $AMOUNT)
+TRANSFER_DATA=$(cast calldata "transfer(address,uint256)" $RECIPIENT $AMOUNT)
+
+# Build batch operations
+# [token_address][0][approve_data_length][approve_data][token_address][0][transfer_data_length][transfer_data]
+```
+
+### Gas Optimization
+
+```shell
+# Test gas usage for different batch sizes
+forge test --match-test test_Performance_LargeBatch --gas-report
+
+# Optimize user operations encoding
+forge snapshot --match-contract DfnsSmartAccount
+```
+
+### Security Testing
+
+```shell
+# Run security-focused tests
+forge test --match-test test_Security
+
+# Test signature malleability
+forge test --match-contract SignatureMalleabilityFixTest
+
+# Fuzz testing
+forge test --match-contract FuzzTestingDfnsSmartAccount
+```
+
+## Integration with Dfns API
+
+After generating the transaction data using forge, use the Dfns API to broadcast:
+
+```bash
+# Use the transaction data from forge create output
+curl -X POST "https://{{customerApiDomain}}/wallets/:walletId/transactions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "kind": "Json",
+    "transaction": {
+      "data": "0x60a0604052348015600e575f5ffd5b506080516107065..."
+    }
+  }'
+```
+
+## Verification
+
+```shell
+# Verify on Holesky
+forge verify-contract $CONTRACT_ADDRESS \
+    ./src/DfnsSmartAccount.sol:DfnsSmartAccount \
+    --verifier-url https://api-holesky.etherscan.io/api \
+    --etherscan-api-key <etherscan-api-key> \
+    --watch
+
+# Verify on mainnet
+forge verify-contract $CONTRACT_ADDRESS \
+    ./src/DfnsSmartAccount.sol:DfnsSmartAccount \
+    --etherscan-api-key <etherscan-api-key> \
+    --watch
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Invalid Signature Error**
+   - Ensure you're using the EOA address as verifying contract in EIP-712 domain
+   - Verify the private key matches the delegating EOA
+   - Check that EIP-7702 delegation is properly set up
+
+2. **Gas Estimation Failures**
+   - Increase gas limit for batch operations
+   - Test with smaller batches first
+   - Ensure sufficient ETH balance in smart account
+
+3. **Nonce Mismatch**
+   - Always fetch current nonce before signing
+   - Account for pending transactions
 
 ### Help
 
 ```shell
-$ forge --help
-$ anvil --help
-$ cast --help
+forge --help
+anvil --help
+cast --help
 ```
+
+## License
+
+LGPL-3.0-only
+
+
