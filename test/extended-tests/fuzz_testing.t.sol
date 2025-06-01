@@ -56,11 +56,6 @@ contract FuzzTestingDfnsSmartAccount is Test {
         vm.deal(dfnsAccount, 10 ether);
     }
 
-
-    // ================================
-    // REDUCED FUZZ/INVARIANT SUITE (4-5 CORE FUNCTIONS)
-    // ================================
-
     /// 1. Assembly/Memory Safety & Operation Decoding
     function testFuzz_AssemblyMemorySafety(
         uint256 value,

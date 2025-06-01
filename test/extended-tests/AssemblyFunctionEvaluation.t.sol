@@ -142,7 +142,7 @@ contract AssemblyFunctionEvaluation is Test {
         
         // Edge Case 1: i equals length (should not enter loop) - this should succeed
         bytes memory equalBoundaryOps = abi.encodePacked(
-            uint256(0x20) // length = 32, i starts at 32, so lt(32, 32) = false, loop doesn't execute
+            uint256(0x20) 
         );
         _testAssemblyOperation(equalBoundaryOps, "i Equals Length", true);
         
@@ -460,7 +460,7 @@ contract AssemblyFunctionEvaluation is Test {
         }
     }
     /**
-     * @dev HIGH VULNERABILITY TEST: Integer Overflow in Iterator
+     * @dev  VULNERABILITY TEST: Integer Overflow in Iterator
      * 
      * ATTACK VECTOR: Manipulate dataLength to cause integer overflow in:
      * `i := add(i, add(0x54, dataLength))`
@@ -493,13 +493,13 @@ contract AssemblyFunctionEvaluation is Test {
     }
 
     /**
-     * @dev MEDIUM VULNERABILITY TEST: Gas Bomb via Returndata
+     * @dev  VULNERABILITY TEST: Gas Bomb via Returndata
      * 
      * ATTACK VECTOR: Create a malicious contract that returns massive returndata
      * When the call fails, returndatacopy will consume excessive gas
      */
-    function test_MEDIUM_GasBomb_ReturndataAttack() public {
-        console.log("\n=== MEDIUM VULNERABILITY: Gas Bomb via Returndata ===");
+    function test_GasBomb_ReturndataAttack() public {
+        console.log("\n=== Gas Bomb via Returndata ===");
         
         // Deploy malicious contract that returns huge data on revert
         GasBombContract gasBomb = new GasBombContract();
@@ -532,12 +532,12 @@ contract AssemblyFunctionEvaluation is Test {
     }
 
     /**
-     * @dev HIGH VULNERABILITY TEST: Reentrancy via Memory Corruption
+     * @dev  VULNERABILITY TEST: Reentrancy via Memory Corruption
      * 
      * ATTACK VECTOR: Use memory corruption to call back into the smart account
      * during the assembly loop execution
      */
-    function test_HIGH_Reentrancy_MemoryCorruption() public {
+    function test__Reentrancy_MemoryCorruption() public {
         console.log("\n=== Reentrancy test via Memory Corruption ===");
         
         // Deploy reentrancy attacker
@@ -556,9 +556,9 @@ contract AssemblyFunctionEvaluation is Test {
             
             // Check if reentrancy was successful (nonce incremented more than once)
             if (nonceAfter > nonceBefore + 1) {
-                emit AssemblyVulnerabilityFound("REENTRANCY_SUCCESS", "HIGH", 
+                emit AssemblyVulnerabilityFound("REENTRANCY_SUCCESS", "", 
                     keccak256(abi.encode(nonceBefore, nonceAfter)));
-                console.log("HIGH: Reentrancy attack succeeded! Nonce jumped from", nonceBefore, "to", nonceAfter);
+                console.log(": Reentrancy attack succeeded! Nonce jumped from", nonceBefore, "to", nonceAfter);
             }
         } catch (bytes memory) {
             console.log("Reentrancy attack properly prevented");
