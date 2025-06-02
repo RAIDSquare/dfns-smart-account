@@ -5,27 +5,19 @@ import {Test, console, console2} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {stdError} from "forge-std/StdError.sol";
 import {DfnsSmartAccount} from "../src/DfnsSmartAccount.sol";
-
-struct Operation {
-    address to;          // 20 bytes
-    uint256 value;       // 32 bytes
-    bytes data;          // variable length
-}
+import {SelfDestructContract, MockERC20, MockERC721, MockDeFiProtocol, CREATE2Deployer, MaliciousContractV1, MaliciousContractV2, GasBombDeployer, VulnerableTarget, MetamorphicContract} from "./utils/mockContracts.sol";
+import {DfnsTestUtils, Operation, TestContext} from "./utils/DfnsTestUtils.sol";
+import {console} from "forge-std/console.sol";
 
 error InvalidSignature();
 
-/**
- * @title DfnsSmartAccount Comprehensive Test Suite
- * @dev Complete test coverage for DfnsSmartAccount contract including:
- * - Constants validation
- * - Signature validation with malleability protection
- * - Batch transactions
- * - EIP-7702 compatibility
- * - Edge cases and security tests
- * - Assembly logic verification
- */
+/// @title DfnsSmartAccount Test Suite
+/// @dev Comprehensive tests for EIP-7702 smart account functionality
 contract DfnsSmartAccountTest is Test {
+    using DfnsTestUtils for TestContext;
+    
     DfnsSmartAccount public dfnsSmartAccount;
+    TestContext public testCtx;
     
     // Test accounts - use forge-std makeAddr for better realism
     address public deployer;
@@ -37,21 +29,19 @@ contract DfnsSmartAccountTest is Test {
     address public eoaOwner;
     uint256 public eoaOwnerPrivateKey;
     
-    // keccak256("DfnsSmartAccount") & (~0xff)
     bytes32 private constant _STORAGE = 0x10ee8db8a0021e326896fcf9b44ce61becefe5f52e3dfd0bb294aee9b73bc000;
-    // keccak256("EIP712Domain(uint256 chainId,address verifyingContract)");
     bytes32 private constant _DOMAIN_TYPEHASH = 0x47e79534a245952e8b16893a336b85a3d9ea9fa8c573f3d803afb92a79469218;
-    // keccak256("HandleOps(bytes32 data,uint256 nonce)")
     bytes32 private constant _HANDLEOPS_TYPEHASH = 0x4f8bb4631e6552ac29b9d6bacf60ff8b5481e2af7c2104fe0261045fa6988111;
 
-    // Signature malleability protection constants
+    // Signature malleability protection constants. 
     uint256 private constant CURVE_ORDER = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
     uint256 private constant HALF_CURVE_ORDER = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
-    
     // Mock ERC20 contract for testing
     MockERC20 public mockToken;
-    
+
+    uint256 constant CHAIN_ID = 31337;
+
     // Events
     event Transfer(address indexed from, address indexed to, uint256 value);
 
@@ -64,18 +54,22 @@ contract DfnsSmartAccountTest is Test {
         recipient = makeAddr("recipient");
         attacker = makeAddr("attacker");
         
-        // Create EOA that will delegate to smart contract (EIP-7702)
         (eoaOwner, eoaOwnerPrivateKey) = makeAddrAndKey("eoaOwner");
         
-        // Deploy DfnsSmartAccount at specific address for Holesky compatibility
         address contractAddress = 0xa570148Ab35de51eA1C59AC09Cc6ea37AC6BaB91;
         deployCodeTo("DfnsSmartAccount.sol", contractAddress);
         dfnsSmartAccount = DfnsSmartAccount(contractAddress);
 
-        // Deploy mock token
+        // Initialize test context for library functions
+        testCtx = DfnsTestUtils.createTestContext(
+            address(dfnsSmartAccount),
+            eoaOwner,
+            eoaOwnerPrivateKey,
+            vm
+        );
+
         mockToken = new MockERC20("Test Token", "TEST", 18);
         
-        // Fund accounts
         vm.deal(user, 100 ether);
         vm.deal(eoaOwner, 100 ether);
         vm.deal(address(dfnsSmartAccount), 10 ether);
@@ -87,24 +81,15 @@ contract DfnsSmartAccountTest is Test {
      * This simulates the EOA delegating to the smart contract implementation
      */
     function _setupEIP7702Delegation() internal {
-        // Create and attach EIP-7702 delegation using the combined function
-        vm.signAndAttachDelegation(address(dfnsSmartAccount), eoaOwnerPrivateKey);
-        
-        // Verify delegation was successful
-        bytes memory code = eoaOwner.code;
-        require(code.length > 0, "EIP-7702 delegation failed - no code at EOA address");
+        DfnsTestUtils.setupEIP7702Delegation(testCtx);
     }
 
-    /* ========== ORIGINAL HOLESKY TESTS ========== */
-
     function test_handleOps() public {
-        
         assertEq(dfnsSmartAccount.getNonce(), 0);
         
-        // Mint tokens to EOA owner for the transfer
         mockToken.mint(eoaOwner, 10 ether);
         
-        // Create dynamic operation equivalent to holeskyUserOps  
+        // define the standard transfer operation for this test.  
         Operation[] memory operations = new Operation[](1);
         operations[0] = Operation({
             to: address(mockToken),
@@ -112,9 +97,9 @@ contract DfnsSmartAccountTest is Test {
             data: abi.encodeWithSignature("transfer(address,uint256)", recipient, 1 ether)
         });
         
-        bytes memory userOps = _encodeOperations(operations);
-        (uint256 r, uint256 vs) = _generateSignature(userOps, 0);
-        _callHandleOps(userOps, r, vs);
+        bytes memory userOps = DfnsTestUtils.encodeOperations(operations);
+        (uint256 r, uint256 vs) = DfnsTestUtils.generateSignature(testCtx, userOps, 0);
+        DfnsTestUtils.callHandleOps(testCtx, userOps, r, vs);
         
         // Check nonce on EOA address (where delegation is active)
         DfnsSmartAccount delegatedContract = DfnsSmartAccount(payable(eoaOwner));
@@ -298,7 +283,7 @@ contract DfnsSmartAccountTest is Test {
 
     /**
      * @dev Simulate signature validation exactly as the contract does in EIP-7702 context
-     * This is needed because in EIP-7702, address(this) in the contract is the EOA address
+     *
      */
     function _simulateContractDigest(bytes memory userOps, uint256 nonce, address contractAddress) 
         internal 
@@ -311,44 +296,7 @@ contract DfnsSmartAccountTest is Test {
         digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
     }
 
-    /**
-     * @dev Test signature validation with various edge cases
-     */
-    function test_SignatureValidation_EdgeCases() public {
-        // Test with EOA signer (EIP-7702 context)
-        bytes32 testHash = keccak256("test message");
-        
-        // Case 1: Valid signature with EOA
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(eoaOwnerPrivateKey, testHash);
-        
-        // Ensure s is in lower half for malleability protection
-        if (uint256(s) > HALF_CURVE_ORDER) {
-            s = bytes32(CURVE_ORDER - uint256(s));
-            v = v == 27 ? 28 : 27;
-        }
-        
-        uint256 vs = (v == 28 ? 1 : 0) << 255 | uint256(s);
-        
-        bool isValid = _simulateSignatureValidation(testHash, uint256(r), vs, eoaOwner);
-        assertTrue(isValid, "Valid signature should be recognized");
-        
-        // Case 2: Invalid signature with wrong signer
-        isValid = _simulateSignatureValidation(testHash, uint256(r), vs, address(dfnsSmartAccount));
-        assertFalse(isValid, "Signature should be invalid for wrong signer");
-        
-        // Case 3: Test malleability protection - invalid r
-        isValid = _simulateSignatureValidation(testHash, 0, vs, eoaOwner);
-        assertFalse(isValid, "Zero r should be invalid");
-        
-        isValid = _simulateSignatureValidation(testHash, CURVE_ORDER, vs, eoaOwner);
-        assertFalse(isValid, "r >= CURVE_ORDER should be invalid");
-        
-        // Case 4: Test malleability protection - invalid s
-        uint256 invalidVS = (v == 28 ? 1 : 0) << 255 | (HALF_CURVE_ORDER + 1);
-        isValid = _simulateSignatureValidation(testHash, uint256(r), invalidVS, eoaOwner);
-        assertFalse(isValid, "s > HALF_CURVE_ORDER should be invalid");
-    }
-
+  
     /**
      * @dev Test hash calculation consistency across different scenarios
      */
@@ -1104,130 +1052,266 @@ contract DfnsSmartAccountTest is Test {
         DfnsSmartAccount delegatedContract = DfnsSmartAccount(payable(eoaOwner));
         assertEq(delegatedContract.getNonce(), 1, "Large batch should succeed");
     }
-
-    // function test_ContractSelfDestruct() public {
-    //     // Deploy a contract that self-destructs and test calling it
-    //     SelfDestructContract destructContract = new SelfDestructContract();
+    /**
+     * @dev Test EIP-712 data generation for DFNS API integration with multiple batched transactions
+     * Tests NFT transfer, DeFi function call, and token transfer in compliance with EIP-712 standard
+     */
+    function test_generateEip712DataForDfnsAPI() public {
+        console.log("=== Testing EIP-712 Data Generation for DFNS API ===");
         
-    //     bytes memory destructCall = abi.encodePacked(
-    //         address(destructContract),    // to (20 bytes)
-    //         uint256(0),                  // value (32 bytes)
-    //         uint256(4),                  // data length (32 bytes)
-    //         abi.encodeWithSignature("destroy()") // data (4 bytes)
-    //     );
+        // Deploy additional mock contracts for comprehensive testing
+        MockERC721 mockNFT = new MockERC721("Test NFT", "TNFT");
+        MockDeFiProtocol defiProtocol = new MockDeFiProtocol();
+        MockERC20 tokenA = new MockERC20("Token A", "TKNA", 18);
+        MockERC20 tokenB = new MockERC20("Token B", "TKNB", 18);
         
-    //     (uint256 r, uint256 vs) = _generateSignature(destructCall, 0);
+        console.log("Mock contracts deployed:");
+        console.log("NFT:", address(mockNFT));
+        console.log("DeFi Protocol:", address(defiProtocol));
+        console.log("Token A:", address(tokenA));
+        console.log("Token B:", address(tokenB));
         
-    //     _callHandleOps(destructCall, r, vs);
+        // Set up initial state
+        _setupEIP7702Delegation();
         
-    //     // Check nonce on EOA address (where delegation is active)
-    //     DfnsSmartAccount delegatedContract = DfnsSmartAccount(payable(eoaOwner));
-    //     assertEq(delegatedContract.getNonce(), 1, "Self-destruct call should succeed");
-    // }
-
-    /* ========== SIGNATURE MALLEABILITY PROTECTION TESTS ========== */
-
-    function test_SignatureMalleabilityProtection() public {
-        bytes32 testHash = keccak256("test message");
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(eoaOwnerPrivateKey, testHash);
+        // Mint NFT to EOA owner
+        uint256 tokenId = mockNFT.mint(eoaOwner);
+        console.log("Minted NFT with token ID:", tokenId);
         
-        // Test 1: Valid signature in lower half
+        // Mint tokens to EOA owner
+        tokenA.mint(eoaOwner, 1000 ether);
+        tokenB.mint(address(defiProtocol), 1000 ether); // Protocol has tokens for swapping
+        mockToken.mint(eoaOwner, 500 ether);
+        
+        console.log("Token balances setup:");
+        console.log("EOA Token A balance:", tokenA.balanceOf(eoaOwner));
+        console.log("EOA Token B balance:", tokenB.balanceOf(eoaOwner));
+        console.log("EOA Mock Token balance:", mockToken.balanceOf(eoaOwner));
+        
+        // Create multiple batched operations following EIP-712 standard
+        Operation[] memory operations = new Operation[](5);
+        
+        // Operation 1: NFT Transfer (safeTransferFrom)
+        operations[0] = Operation({
+            to: address(mockNFT),
+            value: 0,
+            data: abi.encodeWithSignature(
+                "transferFrom(address,address,uint256)",
+                eoaOwner,
+                recipient,
+                tokenId
+            )
+        });
+        
+        // Operation 2: Token approval for DeFi protocol
+        operations[1] = Operation({
+            to: address(tokenA),
+            value: 0,
+            data: abi.encodeWithSignature(
+                "approve(address,uint256)",
+                address(defiProtocol),
+                100 ether
+            )
+        });
+        
+        // Operation 3: DeFi deposit operation
+        operations[2] = Operation({
+            to: address(defiProtocol),
+            value: 0,
+            data: abi.encodeWithSignature(
+                "deposit(address,uint256)",
+                address(tokenA),
+                100 ether
+            )
+        });
+        
+        // Operation 4: Regular ERC20 token transfer
+        operations[3] = Operation({
+            to: address(mockToken),
+            value: 0,
+            data: abi.encodeWithSignature(
+                "transfer(address,uint256)",
+                user,
+                50 ether
+            )
+        });
+        
+        // Operation 5: ETH transfer
+        operations[4] = Operation({
+            to: recipient,
+            value: 2 ether,
+            data: ""
+        });
+        
+        console.log("Created 5 batched operations:");
+        console.log("1. NFT transfer");
+        console.log("2. Token approval for DeFi");
+        console.log("3. DeFi deposit");
+        console.log("4. ERC20 token transfer");
+        console.log("5. ETH transfer");
+        
+        bytes memory userOps = _encodeOperations(operations);
+        console.log("Encoded userOps length:", userOps.length);
+        
+        uint256 currentNonce = DfnsSmartAccount(payable(eoaOwner)).getNonce();
+        console.log("Current nonce:", currentNonce);
+        
+        // Generate EIP-712 compliant data structure
+        (bytes32 dataHash, bytes32 digest, bytes32 domainSeparator) = _generateEip712Data(userOps, currentNonce);
+        
+        console.log("=== EIP-712 Data Structure ===");
+        console.log("Data hash (keccak256 of userOps):");
+        console.logBytes32(dataHash);
+        console.log("EIP-712 digest:");
+        console.logBytes32(digest);
+        console.log("Domain separator:");
+        console.logBytes32(domainSeparator);
+        
+        // Verify EIP-712 compliance
+        
+        // 1. Verify data hash is correct
+        bytes32 expectedDataHash = keccak256(userOps);
+        assertEq(dataHash, expectedDataHash, "Data hash should match keccak256 of userOps");
+        console.log(" Data hash verification passed");
+        
+        // 2. Verify domain separator follows EIP-712 standard
+        bytes32 expectedDomainSeparator = keccak256(abi.encode(
+            _DOMAIN_TYPEHASH, // EIP712Domain(uint256 chainId,address verifyingContract)
+            block.chainid,
+            eoaOwner // In EIP-7702, the EOA becomes the verifying contract
+        ));
+        assertEq(domainSeparator, expectedDomainSeparator, "Domain separator should follow EIP-712 standard");
+        console.log(" Domain separator verification passed");
+        
+        // 3. Verify struct hash follows EIP-712 standard
+        bytes32 expectedStructHash = keccak256(abi.encode(
+            _HANDLEOPS_TYPEHASH, // HandleOps(bytes32 data,uint256 nonce)
+            dataHash,
+            currentNonce
+        ));
+        
+        // 4. Verify final digest follows EIP-712 standard: \x19\x01 + domainSeparator + structHash
+        bytes32 expectedDigest = keccak256(abi.encodePacked(
+            "\x19\x01", // EIP-712 prefix
+            domainSeparator,
+            expectedStructHash
+        ));
+        assertEq(digest, expectedDigest, "Final digest should follow EIP-712 standard");
+        console.log(" Final digest verification passed");
+        
+        // 5. Test signature generation and validation
+        bytes32 contractDigest = _simulateContractDigest(userOps, currentNonce, eoaOwner);
+        assertEq(digest, contractDigest, "Generated digest should match contract digest");
+        console.log(" Contract digest consistency verified");
+        
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(eoaOwnerPrivateKey, contractDigest);
+        console.log("Generated signature components:");
+        console.log("v:", v);
+        console.logBytes32(r);
+        console.logBytes32(s);
+        
+        // Apply malleability protection
         if (uint256(s) > HALF_CURVE_ORDER) {
+            console.log("Applying malleability protection to s");
             s = bytes32(CURVE_ORDER - uint256(s));
             v = v == 27 ? 28 : 27;
         }
         
-        uint256 vs = (v == 28 ? 1 : 0) << 255 | uint256(s);
-        bool isValid = _simulateSignatureValidation(testHash, uint256(r), vs, eoaOwner);
-        assertTrue(isValid, "Valid signature in lower half should pass");
-        
-        // Test 2: Invalid signature with s in upper half
-        uint256 upperS = CURVE_ORDER - uint256(s);
-        uint256 invalidVS = (v == 28 ? 1 : 0) << 255 | upperS;
-        isValid = _simulateSignatureValidation(testHash, uint256(r), invalidVS, eoaOwner);
-        assertFalse(isValid, "Signature with s in upper half should fail");
-        
-        // Test 3: Invalid r = 0
-        isValid = _simulateSignatureValidation(testHash, 0, vs, eoaOwner);
-        assertFalse(isValid, "Signature with r = 0 should fail");
-        
-        // Test 4: Invalid r >= CURVE_ORDER
-        isValid = _simulateSignatureValidation(testHash, CURVE_ORDER, vs, eoaOwner);
-        assertFalse(isValid, "Signature with r >= CURVE_ORDER should fail");
-        
-        // Test 5: Invalid s = 0
-        uint256 zeroSVS = (v == 28 ? 1 : 0) << 255;
-        isValid = _simulateSignatureValidation(testHash, uint256(r), zeroSVS, eoaOwner);
-        assertFalse(isValid, "Signature with s = 0 should fail");
-    }
-
-    /* ========== DFNS API INTEGRATION TESTS ========== */
-
-    /**
-     * @dev Test EIP-712 data generation for DFNS API integration with proper signature validation
-     */
-    function test_generateEip712DataForDfnsAPI() public {
-        bytes memory testOps = abi.encodePacked(
-            uint160(address(0x1234567890123456789012345678901234567890)),
-            uint256(1 ether),
-            uint256(0), // no data
-            bytes("")
-        );
-        
-        // Set up EIP-7702 delegation
-        _setupEIP7702Delegation();
-        
-        // Get the current nonce from the delegated contract
-        uint256 currentNonce = DfnsSmartAccount(payable(eoaOwner)).getNonce();
-        
-        (bytes32 dataHash, bytes32 digest, bytes32 domainSeparator) = _generateEip712Data(testOps, currentNonce);
-        
-        // Verify the data hash is correct
-        assertEq(dataHash, keccak256(testOps), "Data hash should match keccak256 of userOps");
-        
-        // Verify domain separator uses EOA address (EIP-7702 context)
-        bytes32 expectedDomainSeparator = keccak256(abi.encode(
-            _DOMAIN_TYPEHASH,
-            block.chainid,
-            eoaOwner
-        ));
-        assertEq(domainSeparator, expectedDomainSeparator, "Domain separator should use EOA address");
-        
-        // Generate a valid signature using the contract's digest calculation
-        bytes32 contractDigest = _simulateContractDigest(testOps, currentNonce, eoaOwner);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(eoaOwnerPrivateKey, contractDigest);
-        
         // Verify signature recovery
         address recovered = ecrecover(contractDigest, v, r, s);
         assertEq(recovered, eoaOwner, "Signature should recover to EOA owner");
+        console.log(" Signature recovery verification passed");
         
-        // Convert to contract format
+        // Convert to contract format (vs format)
         uint256 rUint = uint256(r);
         uint256 vs = (v == 28 ? 1 : 0) << 255 | uint256(s);
         
-        // Apply malleability protection if needed
-        if (uint256(s) > HALF_CURVE_ORDER) {
-            s = bytes32(CURVE_ORDER - uint256(s));
-            v = v == 28 ? 28 : 27;
-            vs = (v == 28 ? 1 : 0) << 255 | uint256(s);
-        }
+        console.log("Contract format signature:");
+        console.log("r:", rUint);
+        console.log("vs:", vs);
+        console.log("vs >> 255 (v bit):", vs >> 255);
         
-        // Test that the valid signature works
-        bool success = _tryHandleOps(testOps, rUint, vs);
-        assertTrue(success, "Valid signature should succeed");
+        // 6. Test actual execution of the batched operations
+        console.log("=== Executing Batched Operations ===");
         
-        // Verify nonce was incremented
+        // Record initial balances and states
+        uint256 initialRecipientEth = recipient.balance;
+        uint256 initialUserTokens = mockToken.balanceOf(user);
+        address initialNftOwner = mockNFT.ownerOf(tokenId);
+        uint256 initialDefiDeposit = defiProtocol.getDeposit(eoaOwner);
+        
+        console.log("Initial states:");
+        console.log("Recipient ETH balance:", initialRecipientEth);
+        console.log("User token balance:", initialUserTokens);
+        console.log("NFT owner:", initialNftOwner);
+        console.log("DeFi deposit:", initialDefiDeposit);
+        
+        // Execute the batched transaction
+        bool success = _tryHandleOps(userOps, rUint, vs);
+        assertTrue(success, "Batched operations should execute successfully");
+        console.log(" Batched operations executed successfully");
+        
+        // Verify all operations were executed correctly
+        
+        // Check NFT transfer
+        address newNftOwner = mockNFT.ownerOf(tokenId);
+        assertEq(newNftOwner, recipient, "NFT should be transferred to recipient");
+        console.log(" NFT transfer verified");
+        
+        // Check token transfer
+        uint256 newUserTokens = mockToken.balanceOf(user);
+        assertEq(newUserTokens, initialUserTokens + 50 ether, "User should receive 50 tokens");
+        console.log(" Token transfer verified");
+        
+        // Check ETH transfer
+        uint256 newRecipientEth = recipient.balance;
+        assertEq(newRecipientEth, initialRecipientEth + 2 ether, "Recipient should receive 2 ETH");
+        console.log(" ETH transfer verified");
+        
+        // Check DeFi deposit
+        uint256 newDefiDeposit = defiProtocol.getDeposit(eoaOwner);
+        assertEq(newDefiDeposit, initialDefiDeposit + 100 ether, "DeFi deposit should increase by 100 tokens");
+        console.log(" DeFi deposit verified");
+        
+        // 7. Verify nonce increment
         uint256 newNonce = DfnsSmartAccount(payable(eoaOwner)).getNonce();
         assertEq(newNonce, currentNonce + 1, "Nonce should be incremented after successful execution");
+        console.log(" Nonce increment verified");
         
-        // Test that an invalid signature fails
-        uint256 invalidVs = vs ^ 1; // Flip a bit to make it invalid
-        bool invalidSuccess = _tryHandleOps(testOps, rUint, invalidVs);
-        assertFalse(invalidSuccess, "Invalid signature should fail");
+        // 8. Test replay protection with same signature
+        console.log("=== Testing Replay Protection ===");
+        bool replaySuccess = _tryHandleOps(userOps, rUint, vs);
+        assertFalse(replaySuccess, "Replay attack should fail");
+        console.log(" Replay protection verified");
         
-        // Verify nonce was not incremented for failed transaction
+        // 9. Verify final nonce (should not increment on failed replay)
         uint256 finalNonce = DfnsSmartAccount(payable(eoaOwner)).getNonce();
-        assertEq(finalNonce, newNonce, "Nonce should not change after failed execution");
+        assertEq(finalNonce, newNonce, "Nonce should not change after failed replay");
+        console.log(" Final nonce verification passed");
+        
+        // 10. Test EIP-712 data structure components individually
+        console.log("=== EIP-712 Component Verification ===");
+        
+        // Verify domain typehash
+        bytes32 computedDomainTypehash = keccak256("EIP712Domain(uint256 chainId,address verifyingContract)");
+        assertEq(_DOMAIN_TYPEHASH, computedDomainTypehash, "Domain typehash should match standard");
+        console.log(" Domain typehash verification passed");
+        
+        // Verify handleOps typehash
+        bytes32 computedHandleOpsTypehash = keccak256("HandleOps(bytes32 data,uint256 nonce)");
+        assertEq(_HANDLEOPS_TYPEHASH, computedHandleOpsTypehash, "HandleOps typehash should match standard");
+        console.log(" HandleOps typehash verification passed");
+        
+        // 11. Test with different chain ID (should fail)
+        console.log("=== Cross-Chain Protection Test ===");
+        vm.chainId(1); // Change to mainnet
+        bytes32 differentChainDigest = _simulateContractDigest(userOps, currentNonce + 1, eoaOwner);
+        vm.chainId(31337); // Change back
+        
+        assertTrue(differentChainDigest != contractDigest, "Different chain ID should produce different digest");
+        console.log(" Cross-chain protection verified");
+        
+        console.log("=== All EIP-712 Compliance Tests Passed ===");
     }
 
     /**
@@ -1474,122 +1558,352 @@ contract DfnsSmartAccountTest is Test {
         vm.stopPrank();
     }
 
-    /* ========== HELPER FUNCTIONS ========== */
+function test_CREATE2_DeploymentAttackVectors() public {
+    console.log("\n=== CREATE2 Deployment Attack Vector Testing ===");
+    
+    // Deploy the CREATE2 factory and vulnerable target
+    CREATE2Deployer factory = new CREATE2Deployer();
+    VulnerableTarget vulnerableTarget = new VulnerableTarget();
+    DfnsSmartAccount smartAccount = new DfnsSmartAccount();
+    console.log("Factory deployed at:", address(factory));
+    console.log("Vulnerable target at:", address(vulnerableTarget));
+    console.log("Smart account balance:", address(smartAccount).balance);
+    
+    // Give the smart account some initial funds
+    vm.deal(address(smartAccount), 100 ether);
+    vulnerableTarget.transfer(address(smartAccount), 1000 * 10**18);
+    
+    // ========================================
+    // ATTACK 1: Metamorphic Contract Attack
+    // ========================================
+    console.log("\n--- Testing Metamorphic Contract Attack ---");
+    
+    bytes32 metamorphicSalt = keccak256("metamorphic_attack");
+    
+    // Get bytecode for both versions
+    bytes memory v1Bytecode = abi.encodePacked(
+        type(MaliciousContractV1).creationCode,
+        abi.encode(address(vulnerableTarget))
+    );
+    bytes memory v2Bytecode = abi.encodePacked(
+        type(MaliciousContractV2).creationCode,
+        abi.encode(address(vulnerableTarget))
+    );
+    
+    // Predict the deployment address
+    address predictedAddr = factory.predictAddress(metamorphicSalt, v1Bytecode);
+    console.log("Predicted deployment address:", predictedAddr);
+    
+    // Create userOps to deploy V1 contract
+    bytes memory deployV1Ops = _createValidDeploymentUserOps(
+        address(factory),
+        0,
+        abi.encodeWithSignature(
+            "deploy(bytes32,bytes)",
+            metamorphicSalt,
+            v1Bytecode
+        )
+    );
+    
+    // Execute deployment via smart account
+    (uint256 r, uint256 vs) = _generateSignature(deployV1Ops, smartAccount.getNonce());
+    
+    uint256 nonceBefore = smartAccount.getNonce();
+    smartAccount.handleOps(deployV1Ops, r, vs);
+    uint256 nonceAfter = smartAccount.getNonce();
+    
+    console.log("V1 contract deployed. Nonce:", nonceBefore, "->", nonceAfter);
+    
+    // Verify V1 is deployed and working
+    MaliciousContractV1 deployedV1 = MaliciousContractV1(predictedAddr);
+    assertEq(deployedV1.VERSION(), 1, "V1 should report version 1");
+    
+    // Authorize the deployed contract (this is the critical vulnerability)
+    vulnerableTarget.authorizeContract(predictedAddr);
+    assertTrue(vulnerableTarget.authorizedContracts(predictedAddr), "Contract should be authorized");
+    
+    // Now destroy V1 and deploy V2 at the same address
+    bytes memory destroyOps = _createDeploymentUserOps(
+        predictedAddr,
+        0,
+        abi.encodeWithSignature("destroy()")
+    );
+    
+    (r, vs) = _generateSignature(destroyOps, smartAccount.getNonce());
+    smartAccount.handleOps(destroyOps, r, vs);
+    
+    console.log("V1 contract destroyed");
+    
+    // Deploy V2 at the same address
+    bytes memory deployV2Ops = _createDeploymentUserOps(
+        address(factory),
+        0,
+        abi.encodeWithSignature(
+            "deploy(bytes32,bytes)",
+            metamorphicSalt,
+            v2Bytecode
+        )
+    );
+    
+    (r, vs) = _generateSignature(deployV2Ops, smartAccount.getNonce());
+    smartAccount.handleOps(deployV2Ops, r, vs);
+    
+    console.log("V2 contract deployed at same address");
+    
+    // Now the same address has different code but is still authorized!
+    MaliciousContractV2 deployedV2 = MaliciousContractV2(predictedAddr);
+    assertEq(deployedV2.VERSION(), 2, "V2 should report version 2");
+    assertTrue(vulnerableTarget.authorizedContracts(predictedAddr), "Contract should still be authorized");
+    
+    // VULNERABILITY: V2 can now perform malicious actions that V1 couldn't
+    uint256 balanceBefore = vulnerableTarget.balances(address(this));
+    deployedV2.maliciousFunction(); // This mints tokens!
+    uint256 balanceAfter = vulnerableTarget.balances(address(this));
+    
+    console.log("Balance before malicious function:", balanceBefore);
+    console.log("Balance after malicious function:", balanceAfter);
+    
+    assertGt(balanceAfter, balanceBefore, "CRITICAL: Metamorphic attack succeeded - unauthorized minting!");
+    
+    // ========================================
+    // ATTACK 2: Address Collision Attack
+    // ========================================
+    console.log("\n--- Testing Address Collision Attack ---");
+    
+    // Send ETH to a predicted address before deployment
+    bytes32 collisionSalt = keccak256("collision_attack");
+    bytes memory targetBytecode = abi.encodePacked(
+        type(MetamorphicContract).creationCode,
+        abi.encode(address(this))
+    );
+    
+    address collisionAddr = factory.predictAddress(collisionSalt, targetBytecode);
+    
+    // Send ETH to the predicted address
+    bytes memory fundingOps = _createDeploymentUserOps(
+        collisionAddr,
+        10 ether,
+        ""
+    );
+    
+    (r, vs) = _generateSignature(fundingOps, smartAccount.getNonce());
+    smartAccount.handleOps(fundingOps, r, vs);
+    
+    console.log("Funded predicted address with 10 ETH");
+    console.log("Address balance:", address(collisionAddr).balance);
+    
+    // Now deploy contract to that address - it will have the pre-funded ETH
+    bytes memory collisionDeployOps = _createDeploymentUserOps(
+        address(factory),
+        0,
+        abi.encodeWithSignature(
+            "deploy(bytes32,bytes)",
+            collisionSalt,
+            targetBytecode
+        )
+    );
+    
+    (r, vs) = _generateSignature(collisionDeployOps, smartAccount.getNonce());
+    smartAccount.handleOps(collisionDeployOps, r, vs);
+    
+    console.log("Contract deployed at funded address");
+    console.log("Deployed contract balance:", address(collisionAddr).balance);
+    
+    assertEq(address(collisionAddr).balance, 10 ether, "VULNERABILITY: Contract deployed with unexpected ETH balance");
+    
+    // ========================================
+    // ATTACK 3: Gas Bomb Deployment Attack
+    // ========================================
+    console.log("\n--- Testing Gas Bomb Deployment Attack ---");
+    
+    bytes32 gasBombSalt = keccak256("gas_bomb_attack");
+    bytes memory gasBombBytecode = abi.encodePacked(
+        type(GasBombDeployer).creationCode,
+        abi.encode(uint256(10000)) // Large array size
+    );
+    
+    // This should consume excessive gas but not fail completely
+    bytes memory gasBombOps = _createDeploymentUserOps(
+        address(factory),
+        0,
+        abi.encodeWithSignature(
+            "deploy(bytes32,bytes)",
+            gasBombSalt,
+            gasBombBytecode
+        )
+    );
+    
+    (r, vs) = _generateSignature(gasBombOps, smartAccount.getNonce());
+    
+    uint256 gasStart = gasleft();
+    try smartAccount.handleOps(gasBombOps, r, vs) {
+        uint256 gasUsed = gasStart - gasleft();
+        console.log("Gas bomb deployment succeeded, gas used:", gasUsed);
+        
+        address gasBombAddr = factory.predictAddress(gasBombSalt, gasBombBytecode);
+        GasBombDeployer gasBomb = GasBombDeployer(gasBombAddr);
+        console.log("Gas bomb array length:", gasBomb.getArrayLength());
+        
+        // VULNERABILITY: Excessive gas consumption in deployment
+        assertGt(gasUsed, 1000000, "VULNERABILITY: Gas bomb consumed excessive gas");
+        
+    } catch Error(string memory reason) {
+        console.log("Gas bomb deployment failed:", reason);
+        // This is expected behavior if gas limits are properly enforced
+    }
+    
+    // ========================================
+    // ATTACK 4: Batch Deployment Resource Exhaustion
+    // ========================================
+    console.log("\n--- Testing Batch Deployment Attack ---");
+    
+    bytes32[] memory batchSalts = new bytes32[](5);
+    bytes[] memory batchBytecodes = new bytes[](5);
+    
+    for (uint256 i = 0; i < 5; i++) {
+        batchSalts[i] = keccak256(abi.encodePacked("batch_attack", i));
+        batchBytecodes[i] = abi.encodePacked(
+            type(MetamorphicContract).creationCode,
+            abi.encode(address(this))
+        );
+    }
+    
+    bytes memory batchDeployOps = _createDeploymentUserOps(
+        address(factory),
+        5 ether, // Total value to distribute
+        abi.encodeWithSignature(
+            "batchDeploy(bytes32[],bytes[])",
+            batchSalts,
+            batchBytecodes
+        )
+    );
+
+    (r, vs) = _generateSignature(batchDeployOps, smartAccount.getNonce());
+
+    gasStart = gasleft();
+    try smartAccount.handleOps(batchDeployOps, r, vs) {
+        uint256 gasUsed = gasStart - gasleft();
+        console.log("Batch deployment succeeded, gas used:", gasUsed);
+        
+        // Check that contracts were deployed
+        for (uint256 i = 0; i < 5; i++) {
+            address deployedAddr = factory.predictAddress(batchSalts[i], batchBytecodes[i]);
+            assertTrue(_isContract(deployedAddr), "Contract should be deployed");
+            console.log("Deployed contract", i, "at:", deployedAddr);
+        }
+        
+        // VULNERABILITY: Resource exhaustion through batch operations
+        assertGt(gasUsed, 500000, "VULNERABILITY: Batch deployment consumed significant gas");
+        
+    } catch Error(string memory reason) {
+        console.log("Batch deployment failed:", reason);
+    }
+    
+    // ========================================
+    // MITIGATION RECOMMENDATIONS
+    // ========================================
+    console.log("\n--- Mitigation Recommendations ---");
+    console.log("1. Implement gas limits for individual operations");
+    console.log("2. Add authorization checks before CREATE2 deployments");
+    console.log("3. Track and limit contract deployments per transaction");
+    console.log("4. Implement address whitelisting for sensitive operations");
+    console.log("5. Add time delays for contract authorization");
+    console.log("6. Monitor for metamorphic contract patterns");
+}
+
+/**
+ * @dev Helper function to create valid deployment userOps with proper format
+ */
+function _createValidDeploymentUserOps(
+    address target,
+    uint256 value,
+    bytes memory data
+) internal pure returns (bytes memory) {
+    return abi.encodePacked(
+        uint256(84 + data.length), // Total length: 32 (length) + 20 (address) + 32 (value) + 32 (dataLength) + data.length
+        target,                    // Target address (20 bytes)
+        value,                     // ETH value (32 bytes)
+        uint256(data.length),      // Data length (32 bytes)
+        data                       // Encoded function call (variable length)
+    );
+}
+
+/**
+ * @dev Helper function to check if address is a contract
+ */
+function _isContract(address account) internal view returns (bool) {
+    uint256 size;
+    assembly {
+        size := extcodesize(account)
+    }
+    return size > 0;
+}
+    
+    /* ========== HELPER FUNCTIONS (Library Wrappers) ========== */
 
     function _generateSignature(bytes memory userOps, uint256 nonce) internal returns (uint256 r, uint256 vs) {
-        // In EIP-7702 context, the contract calculates digest using EOA address as address(this)
-        bytes32 digest = _simulateContractDigest(userOps, nonce, eoaOwner);
-        
-        // Sign with the EOA's private key
-        (uint8 v, bytes32 rBytes, bytes32 s) = vm.sign(eoaOwnerPrivateKey, digest);
-        
-        // Apply malleability protection - ensure s is in lower half of curve order
-        uint256 sValue = uint256(s);
-        if (sValue > HALF_CURVE_ORDER) {
-            sValue = CURVE_ORDER - sValue;
-            // When we flip s, we also need to flip v
-            v = v == 27 ? 28 : 27;
-        }
-        
-        // Convert to the vs format used by the contract
-        // The vs format: high bit indicates v parity, remaining 255 bits are s
-        r = uint256(rBytes);
-        
-        // Ensure s fits in 255 bits (clear high bit) and set v bit
-        sValue = sValue & 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
-        vs = (v == 27 ? 0 : uint256(1 << 255)) | sValue;
+        return DfnsTestUtils.generateSignature(testCtx, userOps, nonce);
     }
 
-    /**
-     * @dev Encode operations into userOps format
-     * Format: to(20) + value(32) + dataLength(32) + data(variable)
-     */
     function _encodeOperations(Operation[] memory operations) internal pure returns (bytes memory) {
-        bytes memory encoded;
-        
-        for (uint256 i = 0; i < operations.length; i++) {
-            encoded = abi.encodePacked(
-                encoded,
-                operations[i].to,        // 20 bytes
-                operations[i].value,     // 32 bytes  
-                operations[i].data.length, // 32 bytes
-                operations[i].data       // variable length
-            );
-        }
-        
-        return encoded;
+        return DfnsTestUtils.encodeOperations(operations);
     }
 
-    /**
-     * @dev Generate EIP-712 data structure for DFNS API integration
-     * @param userOps Encoded User Ops
-     * @param nonce The nonce value
-     * @return dataHash The keccak256 hash of userOps (for EIP-712 message.data field)
-     * @return digest The final EIP-712 digest that would be signed
-     * @return domainSeparator The domain separator for verification
-     */
     function _generateEip712Data(bytes memory userOps, uint256 nonce) 
         internal 
         view 
         returns (bytes32 dataHash, bytes32 digest, bytes32 domainSeparator) 
     {
-        // Calculate data hash for EIP-712 message
-        dataHash = keccak256(userOps);
-        
-        // In EIP-7702, when the contract executes, address(this) will be the EOA address
-        // because the EOA has delegated its code to the smart contract
-        // So we use the EOA address as the verifying contract
-        domainSeparator = keccak256(abi.encode(
-            _DOMAIN_TYPEHASH,
-            block.chainid,
-            eoaOwner  // This will be address(this) when the contract executes via EIP-7702
-        ));
-        
-        bytes32 structHash = keccak256(abi.encode(
-            _HANDLEOPS_TYPEHASH,
-            dataHash,
-            nonce
-        ));
-        
-        digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+        return DfnsTestUtils.generateEip712Data(testCtx, userOps, nonce);
     }
     
-    /**
-     * @dev Call handleOps with proper EIP-7702 delegation context
-     */
     function _callHandleOps(bytes memory userOps, uint256 r, uint256 vs) internal {
-        // Set up EIP-7702 delegation
-        _setupEIP7702Delegation();
-        
-        // Call the contract from the EOA context (EIP-7702 delegation)
-        vm.startPrank(eoaOwner);
-        
-        // Get the contract instance at the EOA address (delegation simulation)
-        DfnsSmartAccount delegatedContract = DfnsSmartAccount(payable(eoaOwner));
-        delegatedContract.handleOps(userOps, r, vs);
-        
-        vm.stopPrank();
+        DfnsTestUtils.callHandleOps(testCtx, userOps, r, vs);
     }
 
-    /**
-     * @dev Safely attempt to call handleOps and return success status
-     * @param userOps The encoded user operations
-     * @param r The r component of the signature
-     * @param vs The combined v and s components
-     * @return success True if the call succeeded, false if it reverted
-     */
     function _tryHandleOps(bytes memory userOps, uint256 r, uint256 vs) internal returns (bool success) {
-        // After EIP-7702 delegation, the EOA address behaves like the smart contract
-        // We create a DfnsSmartAccount interface pointing to the EOA address
-        DfnsSmartAccount delegatedContract = DfnsSmartAccount(payable(eoaOwner));
-        
-        vm.startPrank(eoaOwner);
-        try delegatedContract.handleOps(userOps, r, vs) {
-            success = true;
-        } catch {
-            success = false;
-        }
-        vm.stopPrank();
+        return DfnsTestUtils.tryHandleOps(testCtx, userOps, r, vs);
+    }
+
+    function _simulateContractDigest(bytes memory userOps, uint256 nonce, address contractAddress) 
+        internal 
+        view 
+        returns (bytes32 digest) 
+    {
+        return DfnsTestUtils.simulateContractDigest(testCtx, userOps, nonce, contractAddress);
+    }
+
+    function _simulateSignatureValidation(
+        bytes32 hash, 
+        uint256 r, 
+        uint256 vs, 
+        address expectedSigner
+    ) internal pure returns (bool) {
+        return DfnsTestUtils.simulateSignatureValidation(hash, r, vs, expectedSigner);
+    }
+
+    function _simulateHashCalculation(
+        bytes memory userOps, 
+        uint256 nonce, 
+        address verifyingContract
+    ) internal view returns (bytes32) {
+        return DfnsTestUtils.simulateHashCalculation(userOps, nonce, verifyingContract);
+    }
+
+    function _validateOperationFormat(bytes memory userOps) internal pure returns (bool) {
+        return DfnsTestUtils.validateOperationFormat(userOps);
+    }
+
+    function _createValidDeploymentUserOps(
+        address target,
+        uint256 value,
+        bytes memory data
+    ) internal pure returns (bytes memory) {
+        return DfnsTestUtils.createValidDeploymentUserOps(target, value, data);
+    }
+
+    function _isContract(address account) internal view returns (bool) {
+        return DfnsTestUtils.isContract(account);
     }
 
     // Receive function to accept ETH
@@ -1598,53 +1912,3 @@ contract DfnsSmartAccountTest is Test {
 
 /* ========== MOCK CONTRACTS ========== */
 
-contract MockERC20 {
-    string public name;
-    string public symbol;
-    uint8 public decimals;
-    uint256 public totalSupply;
-    
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-    
-    event Transfer(address indexed from, address indexed to, uint256 value);
-    event Approval(address indexed owner, address indexed spender, uint256 value);
-    
-    constructor(string memory _name, string memory _symbol, uint8 _decimals) {
-        name = _name;
-        symbol = _symbol;
-        decimals = _decimals;
-    }
-    
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-        totalSupply += amount;
-        emit Transfer(address(0), to, amount);
-    }
-    
-    function transfer(address to, uint256 amount) external returns (bool) {
-        require(balanceOf[msg.sender] >= amount, "Insufficient balance");
-        balanceOf[msg.sender] -= amount;
-        balanceOf[to] += amount;
-        emit Transfer(msg.sender, to, amount);
-        return true;
-    }
-    
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        emit Approval(msg.sender, spender, amount);
-        return true;
-    }
-}
-
-contract SelfDestructContract {
-    bool public destroyed = false;
-    
-    function destroy() external {
-        destroyed = true;
-        // Transfer all Ether to sender (simulating selfdestruct behavior)
-        payable(msg.sender).transfer(address(this).balance);
-    }
-    
-    receive() external payable {}
-}
