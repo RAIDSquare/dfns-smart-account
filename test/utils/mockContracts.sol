@@ -33,33 +33,6 @@ contract MockTarget {
     }
 }
 
-// contract ReentrancyAttacker {
-//     address public smartAccount;
-//     uint256 public callCount;
-    
-//     constructor(address _smartAccount) {
-//         smartAccount = _smartAccount;
-//     }
-    
-//     function attack() external payable {
-//     }
-    
-//     receive() external payable {
-//                 callCount++;
-        
-//         // Try to call back into smart account (should fail due to signature verification)
-
-//         if (callCount == 1) {
-//             try DfnsSmartAccount().handleOps("", 0, 0) {
-//                 // This should fail
-//             } catch {
-//                 // Expected to fail
-//             }
-//         }
-
-//     }
-// }
-
 contract MockERC20 {
     string public name;
     string public symbol;
@@ -455,7 +428,7 @@ contract AssemblyTestTarget {
 }
 
 /**
- * @title GasBombContract - Contract for testing gas bomb attacks
+ * @title GasBombContract - Contract for testing excessive gas usage / exhaustion attacks
  */
 contract GasBombContract {
     function gasBombRevert(uint256 dataSize) external pure {
@@ -516,51 +489,262 @@ contract ReentrancyAttacker {
     }
 }
 
+/**
+ * @title CREATE2Deployer - Factory contract for deterministic deployments
+ * @dev Allows deployment of contracts to deterministic addresses using CREATE2
+ */
+contract CREATE2Deployer {
+    event ContractDeployed(address indexed contractAddress, bytes32 indexed salt, address indexed deployer);
+    event DeploymentFailed(bytes32 indexed salt, address indexed deployer, string reason);
+    
+    mapping(address => bool) public deployedContracts;
+    mapping(bytes32 => address) public saltToAddress;
+    
+    /**
+     * @dev Deploy contract using CREATE2 opcode
+     * @param salt The salt value for deterministic address generation
+     * @param bytecode The contract bytecode to deploy
+     * @return deployed The address of the deployed contract
+     */
+    function deploy(bytes32 salt, bytes memory bytecode) external payable returns (address deployed) {
+        // Predict the address before deployment
+        address predicted = predictAddress(salt, bytecode);
+        
+        // Check if contract already exists at this address
+        require(!_isContract(predicted), "Contract already exists at address");
+        
+        assembly {
+            deployed := create2(callvalue(), add(bytecode, 0x20), mload(bytecode), salt)
+        }
+        
+        require(deployed != address(0), "CREATE2 deployment failed");
+        require(deployed == predicted, "Deployed address mismatch");
+        
+        deployedContracts[deployed] = true;
+        saltToAddress[salt] = deployed;
+        
+        emit ContractDeployed(deployed, salt, msg.sender);
+    }
+    
+    /**
+     * @dev Deploy contract with constructor parameters
+     * @param salt The salt value for deterministic address generation
+     * @param bytecode The contract bytecode without constructor parameters
+     * @param constructorData The encoded constructor parameters
+     * @return deployed The address of the deployed contract
+     */
+    function deployWithConstructor(
+        bytes32 salt, 
+        bytes memory bytecode, 
+        bytes memory constructorData
+    ) external payable returns (address deployed) {
+        bytes memory deployBytecode = abi.encodePacked(bytecode, constructorData);
+        return this.deploy{value: msg.value}(salt, deployBytecode);
+    }
+    
+    /**
+     * @dev Predict the deployment address for given salt and bytecode
+     * @param salt The salt value
+     * @param bytecode The contract bytecode
+     * @return predicted The predicted deployment address
+     */
+    function predictAddress(bytes32 salt, bytes memory bytecode) public view returns (address predicted) {
+        bytes32 hash = keccak256(
+            abi.encodePacked(
+                bytes1(0xff),
+                address(this),
+                salt,
+                keccak256(bytecode)
+            )
+        );
+        return address(uint160(uint256(hash)));
+    }
+    
+    /**
+     * @dev Batch deploy multiple contracts
+     * @param salts Array of salt values
+     * @param bytecodes Array of contract bytecodes
+     * @return deployedAddresses Array of deployed contract addresses
+     */
+    function batchDeploy(
+        bytes32[] memory salts, 
+        bytes[] memory bytecodes
+    ) external payable returns (address[] memory deployedAddresses) {
+        require(salts.length == bytecodes.length, "Array length mismatch");
+        
+        deployedAddresses = new address[](salts.length);
+        uint256 valuePerDeployment = msg.value / salts.length;
+        
+        for (uint256 i = 0; i < salts.length; i++) {
+            try this.deploy{value: valuePerDeployment}(salts[i], bytecodes[i]) returns (address deployed) {
+                deployedAddresses[i] = deployed;
+            } catch Error(string memory reason) {
+                emit DeploymentFailed(salts[i], msg.sender, reason);
+                deployedAddresses[i] = address(0);
+            }
+        }
+    }
+    
+    /**
+     * @dev Deploy a metamorphic contract (for testing vulnerabilities)
+     * @param salt The salt for deployment
+     * @param initialBytecode The initial contract bytecode
+     * @return deployed The deployed contract address
+     */
+    function deployMetamorphic(
+        bytes32 salt, 
+        bytes memory initialBytecode
+    ) external payable returns (address deployed) {
+        deployed = this.deploy{value: msg.value}(salt, initialBytecode);
+        
+        // The deployed contract can later self-destruct and be replaced
+        return deployed;
+    }
+    
+    /**
+     * @dev Emergency function to destroy a deployed contract (if it supports it)
+     * @param contractAddress The address of the contract to destroy
+     */
+    function emergencyDestroy(address contractAddress) external {
+        require(deployedContracts[contractAddress], "Contract not deployed by this factory");
+        
+        // Call destroy function if the contract supports it
+        (bool success,) = contractAddress.call(abi.encodeWithSignature("destroy()"));
+        if (success) {
+            deployedContracts[contractAddress] = false;
+        }
+    }
+    
+    function _isContract(address account) internal view returns (bool) {
+        uint256 size;
+        assembly {
+            size := extcodesize(account)
+        }
+        return size > 0;
+    }
+}
 
-// /**
-//  * @title ReentrancyAttacker
-//  * @dev Contract designed to test reentrancy vulnerabilities
-//  */
-// contract ReentrancyAttacker {
-//     DfnsSmartAccount public target;
-//     bool public reentrancyAttempted = false;
-//     uint256 public attackCount = 0;
+/**
+ * @title MetamorphicContract - Test contract for metamorphic deployment attacks
+ */
+contract MetamorphicContract {
+    uint256 public version = 1;
+    address public owner;
+    bool public destroyed = false;
     
-//     constructor(address _target) {
-//         target = DfnsSmartAccount(_target);
-//     }
+    constructor(address _owner) {
+        owner = _owner;
+    }
     
-//     function attack() external {
-//         reentrancyAttempted = true;
-//         attackCount++;
-        
-//         // Attempt reentrancy - try to call handleOps again
-//         if (attackCount < 3) { // Limit to prevent infinite recursion in test
-//             bytes memory emptyOps = abi.encodePacked(uint256(0));
-//             try target.handleOps(emptyOps, 0, 0) {
-//                 // Reentrancy succeeded
-//             } catch {
-//                 // Reentrancy failed (expected if properly protected)
-//             }
-//         }
-//     }
+    function setVersion(uint256 _version) external {
+        require(msg.sender == owner, "Only owner");
+        version = _version;
+    }
     
-//     function crossFunctionAttack() external {
-//         reentrancyAttempted = true;
-        
-//         // Try to call other functions during execution
-//         try target.getNonce() returns (uint256) {
-//             // Cross-function call succeeded
-//         } catch {
-//             // Call failed
-//         }
-//     }
+    function destroy() external {
+        require(msg.sender == owner, "Only owner");
+        destroyed = true;
+        selfdestruct(payable(owner));
+    }
     
-//     fallback() external payable {
-//         // Accept any calls
-//     }
+    function maliciousFunction() external {
+        // This function might not exist in the original contract
+        // but could be added in a metamorphic replacement
+        require(version >= 2, "Function not available in version 1");
+    }
+}
+
+/**
+ * @title VulnerableTarget - Contract with state that can be manipulated via CREATE2
+ */
+contract VulnerableTarget {
+    mapping(address => uint256) public balances;
+    mapping(address => bool) public authorizedContracts;
+    uint256 public totalSupply;
     
-//     receive() external payable {
-//         // Accept ETH
-//     }
-// }
+    constructor() {
+        totalSupply = 1000000 * 10**18;
+        balances[msg.sender] = totalSupply;
+    }
+    
+    function authorizeContract(address contractAddr) external {
+        require(balances[msg.sender] > 0, "No balance");
+        authorizedContracts[contractAddr] = true;
+    }
+    
+    function mint(address to, uint256 amount) external {
+        require(authorizedContracts[msg.sender], "Not authorized");
+        balances[to] += amount;
+        totalSupply += amount;
+    }
+    
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balances[msg.sender] >= amount, "Insufficient balance");
+        balances[msg.sender] -= amount;
+        balances[to] += amount;
+        return true;
+    }
+}
+
+/**
+ * @title MaliciousContractV1 - First version of a contract for metamorphic testing
+ */
+contract MaliciousContractV1 {
+    uint256 public constant VERSION = 1;
+    address public target;
+    
+    constructor(address _target) {
+        target = _target;
+    }
+    
+    function legitimateFunction() external view returns (uint256) {
+        return VERSION;
+    }
+    
+    function destroy() external {
+        selfdestruct(payable(msg.sender));
+    }
+}
+
+/**
+ * @title MaliciousContractV2 - Second version with different behavior
+ */
+contract MaliciousContractV2 {
+    uint256 public constant VERSION = 2;
+    address public target;
+    
+    constructor(address _target) {
+        target = _target;
+    }
+    
+    function legitimateFunction() external view returns (uint256) {
+        return VERSION;
+    }
+    
+    function maliciousFunction() external {
+        // This function didn't exist in V1 but can manipulate state
+        VulnerableTarget(target).mint(msg.sender, 1000000 * 10**18);
+    }
+    
+    function destroy() external {
+        selfdestruct(payable(msg.sender));
+    }
+}
+
+/**
+ * @title GasBombDeployer - Contract that consumes excessive gas during deployment
+ */
+contract GasBombDeployer {
+    uint256[] public massiveArray;
+    
+    constructor(uint256 size) {
+        // Consume gas during deployment
+        for (uint256 i = 0; i < size && gasleft() > 10000; i++) {
+            massiveArray.push(i);
+        }
+    }
+    
+    function getArrayLength() external view returns (uint256) {
+        return massiveArray.length;
+    }
+}

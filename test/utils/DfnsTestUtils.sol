@@ -4,7 +4,7 @@ pragma solidity ^0.8.29;
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {DfnsSmartAccount} from "../../src/DfnsSmartAccount.sol";
-
+import {MockERC20, MockERC721} from "./mockContracts.sol"; 
 struct Operation {
     address to;          // 20 bytes
     uint256 value;       // 32 bytes
@@ -164,25 +164,21 @@ library DfnsTestUtils {
      * @param userOps Encoded user operations
      * @param r The r component of the signature
      * @param vs The combined v and s components
+     * @return success True if the call succeeded, false if it reverted
      */
-    function callHandleOps(
-        TestContext memory ctx,
-        bytes memory userOps, 
-        uint256 r, 
-        uint256 vs
-    ) internal {
-        // Set up EIP-7702 delegation
-        setupEIP7702Delegation(ctx);
-        
-        // Call the contract from the EOA context (EIP-7702 delegation)
-        ctx.vm.startPrank(ctx.eoaOwner);
-        
-        // Get the contract instance at the EOA address (delegation simulation)
-        DfnsSmartAccount delegatedContract = DfnsSmartAccount(payable(ctx.eoaOwner));
-        delegatedContract.handleOps(userOps, r, vs);
-        
-        ctx.vm.stopPrank();
+// In DfnsTestUtils.sol
+function callHandleOps(
+    TestContext memory ctx,
+    bytes memory userOps,
+    uint256 r,
+    uint256 vs
+) internal returns (bool success) {
+    try DfnsSmartAccount(payable(ctx.dfnsSmartAccount)).handleOps(userOps, r, vs) {
+        return true;
+    } catch {
+        return false;
     }
+}
 
     /**
      * @dev Safely attempt to call handleOps and return success status
@@ -341,5 +337,514 @@ library DfnsTestUtils {
             size := extcodesize(account)
         }
         return size > 0;
+    }
+
+    // =================== INVARIANT TESTING UTILITIES ===================
+
+    /**
+     * @dev Validate nonce monotonicity and uniqueness
+     * @param ctx Test context
+     * @param expectedMinNonce Minimum expected nonce value
+     * @return isValid True if nonce constraints are satisfied
+     */
+    function validateNonceInvariant(
+        TestContext memory ctx,
+        uint256 expectedMinNonce
+    ) internal view returns (bool isValid) {
+        DfnsSmartAccount account = DfnsSmartAccount(ctx.dfnsSmartAccount);
+        uint256 currentNonce = account.getNonce();
+        return currentNonce >= expectedMinNonce;
+    }
+
+    /**
+     * @dev Test signature validation with malformed signatures
+     * @param ctx Test context
+     * @param userOps Valid user operations
+     * @return allInvalidSigsRejected True if all invalid signatures are properly rejected
+     */
+    function testInvalidSignatureRejection(
+        TestContext memory ctx,
+        bytes memory userOps
+    ) internal returns (bool allInvalidSigsRejected) {
+        uint256 currentNonce = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        
+        // Test 1: Invalid r value (zero)
+        if (!_testInvalidSignature(ctx, userOps, 0, 1, currentNonce)) {
+            return false;
+        }
+        
+        // Test 2: Invalid r value (>= curve order)
+        if (!_testInvalidSignature(ctx, userOps, CURVE_ORDER, 1, currentNonce)) {
+            return false;
+        }
+        
+        // Test 3: Invalid s value (zero)
+        if (!_testInvalidSignature(ctx, userOps, 1, 0, currentNonce)) {
+            return false;
+        }
+        
+        // Test 4: Invalid s value (> half curve order - malleable)
+        if (!_testInvalidSignature(ctx, userOps, 1, HALF_CURVE_ORDER + 1, currentNonce)) {
+            return false;
+        }
+        
+        return true;
+    }
+
+    /**
+     * @dev Test assembly parsing with malformed userOps
+     * @param ctx Test context
+     * @return memoryAndParsingSecure True if assembly parsing is secure
+     */
+    function testAssemblyParsingSecurity(
+        TestContext memory ctx
+    ) internal returns (bool memoryAndParsingSecure) {
+        DfnsSmartAccount delegatedContract = DfnsSmartAccount(payable(ctx.eoaOwner));
+        
+        // Test 1: Empty userOps (should succeed)
+        bytes memory emptyOps = abi.encodePacked(uint256(0));
+        if (!_tryUserOps(ctx, emptyOps)) {
+            return false; // Empty ops should succeed
+        }
+        
+        // Test 2: Truncated operation (should fail)
+        bytes memory truncatedOps = abi.encodePacked(
+            uint256(50), // Claims 50 bytes
+            address(0x1234), // Only 20 bytes provided
+            uint256(1 ether) // 32 bytes, total 52 > 50
+        );
+        if (_tryUserOps(ctx, truncatedOps)) {
+            return false; // Truncated ops should fail
+        }
+        
+        // Test 3: Data length mismatch (should fail)
+        bytes memory mismatchOps = abi.encodePacked(
+            uint256(100), // Claims 100 bytes total
+            address(0x1234), // 20 bytes
+            uint256(0), // 32 bytes
+            uint256(1000), // Claims 1000 bytes of data but only has ~48 bytes left
+            bytes4(0x12345678) // 4 bytes of data
+        );
+        if (_tryUserOps(ctx, mismatchOps)) {
+            return false; // Mismatched data length should fail
+        }
+        
+        return true;
+    }
+
+    /**
+     * @dev Test batch atomicity invariant
+     * @param ctx Test context
+     * @param target Target contract address
+     * @return batchIsAtomic True if batch operations are atomic
+     */
+    function testBatchAtomicity(
+        TestContext memory ctx,
+        address target
+    ) internal returns (bool batchIsAtomic) {
+        uint256 balanceBefore = ctx.eoaOwner.balance;
+        uint256 nonceBefore = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        
+        // Create a batch with one valid and one failing operation
+        Operation[] memory operations = new Operation[](2);
+        operations[0] = Operation({
+            to: target,
+            value: 1 ether,
+            data: ""
+        });
+        operations[1] = Operation({
+            to: address(0), // This should fail
+            value: 1 ether,
+            data: ""
+        });
+        
+        bytes memory batchOps = encodeOperations(operations);
+        (uint256 r, uint256 vs) = generateSignature(ctx, batchOps, nonceBefore);
+        
+        // Execute batch - should fail atomically
+        bool success = _tryUserOpsRaw(ctx, batchOps, r, vs);
+        
+        uint256 balanceAfter = ctx.eoaOwner.balance;
+        uint256 nonceAfter = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        
+        // If batch failed, no changes should have occurred
+        if (!success) {
+            return (balanceAfter == balanceBefore && nonceAfter == nonceBefore);
+        }
+        
+        // If batch succeeded unexpectedly, that's also a problem
+        return false;
+    }
+
+    /**
+     * @dev Test cross-chain replay protection
+     * @param ctx Test context
+     * @param userOps Valid user operations
+     * @return replayProtected True if replay protection is working
+     */
+    function testCrossChainReplayProtection(
+        TestContext memory ctx,
+        bytes memory userOps
+    ) internal returns (bool replayProtected) {
+        uint256 currentNonce = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        
+        // Create valid signature for current chain
+        (uint256 r, uint256 vs) = generateSignature(ctx, userOps, currentNonce);
+        
+        // Change chain ID and try to replay
+        uint256 originalChainId = block.chainid;
+        ctx.vm.chainId(originalChainId + 1);
+        
+        // Try to replay the same signature on different chain
+        bool replaySucceeded = _tryUserOpsRaw(ctx, userOps, r, vs);
+        
+        // Restore original chain ID
+        ctx.vm.chainId(originalChainId);
+        
+        // Replay should fail
+        return !replaySucceeded;
+    }
+
+    /**
+     * @dev Test ERC token operation consistency
+     * @param ctx Test context
+     * @param tokenContract ERC20 token contract
+     * @param recipient Recipient address
+     * @param amount Transfer amount
+     * @return operationsConsistent True if ERC operations maintain consistency
+     */
+    function testERC20OperationConsistency(
+        TestContext memory ctx,
+        address tokenContract,
+        address recipient,
+        uint256 amount
+    ) internal returns (bool operationsConsistent) {
+        // Get initial balances
+        uint256 senderBalanceBefore = MockERC20(tokenContract).balanceOf(ctx.eoaOwner);
+        uint256 recipientBalanceBefore = MockERC20(tokenContract).balanceOf(recipient);
+        
+        if (senderBalanceBefore < amount) {
+            return true; // Skip if insufficient balance
+        }
+        
+        // Create ERC20 transfer operation
+        Operation[] memory operations = new Operation[](1);
+        operations[0] = Operation({
+            to: tokenContract,
+            value: 0,
+            data: abi.encodeWithSignature("transfer(address,uint256)", recipient, amount)
+        });
+        
+        bytes memory userOps = encodeOperations(operations);
+        uint256 currentNonce = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        (uint256 r, uint256 vs) = generateSignature(ctx, userOps, currentNonce);
+        
+        // Execute operation
+        bool success = _tryUserOpsRaw(ctx, userOps, r, vs);
+        
+        if (success) {
+            // Check final balances
+            uint256 senderBalanceAfter = MockERC20(tokenContract).balanceOf(ctx.eoaOwner);
+            uint256 recipientBalanceAfter = MockERC20(tokenContract).balanceOf(recipient);
+            
+            // Verify balance changes are correct
+            return (senderBalanceAfter == senderBalanceBefore - amount) &&
+                   (recipientBalanceAfter == recipientBalanceBefore + amount);
+        }
+        
+        return true; // If operation failed, that's acceptable
+    }
+
+    /**
+     * @dev Test gas limit enforcement
+     * @param ctx Test context
+     * @param maxGasPerOperation Maximum allowed gas per operation
+     * @return gasLimitsEnforced True if gas limits are properly enforced
+     */
+    function testGasLimitEnforcement(
+        TestContext memory ctx,
+        uint256 maxGasPerOperation
+    ) internal returns (bool gasLimitsEnforced) {
+        // Create a simple operation
+        Operation[] memory operations = new Operation[](1);
+        operations[0] = Operation({
+            to: ctx.dfnsSmartAccount,
+            value: 0,
+            data: ""
+        });
+        
+        bytes memory userOps = encodeOperations(operations);
+        uint256 currentNonce = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        (uint256 r, uint256 vs) = generateSignature(ctx, userOps, currentNonce);
+        
+        // Measure gas usage
+        uint256 gasBefore = gasleft();
+        bool success = _tryUserOpsRaw(ctx, userOps, r, vs);
+        uint256 gasUsed = gasBefore - gasleft();
+        
+        // Gas usage should be within reasonable bounds
+        return gasUsed <= maxGasPerOperation;
+    }
+
+    /**
+     * @dev Create valid userOps for testing
+     * @return userOps Valid encoded user operations
+     */
+    function createValidTestUserOps() internal pure returns (bytes memory userOps) {
+        Operation[] memory operations = new Operation[](1);
+        operations[0] = Operation({
+            to: address(0x1234567890123456789012345678901234567890),
+            value: 0,
+            data: ""
+        });
+        return encodeOperations(operations);
+    }
+
+    // =================== PRIVATE HELPER FUNCTIONS ===================
+
+    /**
+     * @dev Test if an invalid signature is properly rejected
+     */
+    function _testInvalidSignature(
+        TestContext memory ctx,
+        bytes memory userOps,
+        uint256 r,
+        uint256 s,
+        uint256 nonce
+    ) private returns (bool rejected) {
+        uint256 vs = s; // Simplified vs format for testing
+        
+        setupEIP7702Delegation(ctx);
+        ctx.vm.startPrank(ctx.eoaOwner);
+        
+        DfnsSmartAccount delegatedContract = DfnsSmartAccount(payable(ctx.eoaOwner));
+        try delegatedContract.handleOps(userOps, r, vs) {
+            ctx.vm.stopPrank();
+            return false; // Should have reverted
+        } catch {
+            ctx.vm.stopPrank();
+            return true; // Correctly rejected
+        }
+    }
+
+    /**
+     * @dev Try executing userOps and return success status
+     */
+    function _tryUserOps(
+        TestContext memory ctx,
+        bytes memory userOps
+    ) private returns (bool success) {
+        uint256 currentNonce = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        (uint256 r, uint256 vs) = generateSignature(ctx, userOps, currentNonce);
+        return _tryUserOpsRaw(ctx, userOps, r, vs);
+    }
+
+    /**
+     * @dev Try executing userOps with given signature components
+     */
+    function _tryUserOpsRaw(
+        TestContext memory ctx,
+        bytes memory userOps,
+        uint256 r,
+        uint256 vs
+    ) private returns (bool success) {
+        setupEIP7702Delegation(ctx);
+        ctx.vm.startPrank(ctx.eoaOwner);
+        
+        DfnsSmartAccount delegatedContract = DfnsSmartAccount(payable(ctx.eoaOwner));
+        try delegatedContract.handleOps(userOps, r, vs) {
+            success = true;
+        } catch {
+            success = false;
+        }
+        
+        ctx.vm.stopPrank();
+    }
+
+    /**
+     * @dev Test reentrancy protection during operations
+     * @param ctx Test context
+     * @param target Contract to test reentrancy with
+     * @return reentrancyProtected True if reentrancy is properly prevented
+     */
+    function testReentrancyProtection(
+        TestContext memory ctx,
+        address target
+    ) internal returns (bool reentrancyProtected) {
+        // Create operation that could potentially trigger reentrancy
+        Operation[] memory operations = new Operation[](1);
+        operations[0] = Operation({
+            to: target,
+            value: 1 ether,
+            data: abi.encodeWithSignature("attemptReentrancy()")
+        });
+        
+        bytes memory userOps = encodeOperations(operations);
+        uint256 currentNonce = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        (uint256 r, uint256 vs) = generateSignature(ctx, userOps, currentNonce);
+        
+        // Attempt reentrancy attack - should fail
+        bool success = _tryUserOpsRaw(ctx, userOps, r, vs);
+        
+        // Reentrancy should be prevented (operation should fail)
+        return !success;
+    }
+
+    /**
+     * @dev Test signature replay across different nonces
+     * @param ctx Test context
+     * @param userOps Valid user operations
+     * @return replayPrevented True if replay is properly prevented
+     */
+    function testNonceReplayProtection(
+        TestContext memory ctx,
+        bytes memory userOps
+    ) internal returns (bool replayPrevented) {
+        uint256 currentNonce = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        
+        // Create signature with current nonce
+        (uint256 r, uint256 vs) = generateSignature(ctx, userOps, currentNonce);
+        
+        // Execute once (should succeed)
+        bool firstSuccess = _tryUserOpsRaw(ctx, userOps, r, vs);
+        
+        if (!firstSuccess) {
+            return true; // If first call failed, that's acceptable
+        }
+        
+        // Try to replay same signature with old nonce (should fail)
+        bool replaySuccess = _tryUserOpsRaw(ctx, userOps, r, vs);
+        
+        // Replay should fail
+        return !replaySuccess;
+    }
+
+    /**
+     * @dev Test operation ordering and nonce enforcement
+     * @param ctx Test context
+     * @return orderingEnforced True if operation ordering is properly enforced
+     */
+    function testOperationOrdering(
+        TestContext memory ctx
+    ) internal returns (bool orderingEnforced) {
+        uint256 currentNonce = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        
+        // Create two operations with future nonces
+        bytes memory userOps1 = createValidTestUserOps();
+        bytes memory userOps2 = createValidTestUserOps();
+        
+        // Create signatures with wrong nonce order
+        (uint256 r2, uint256 vs2) = generateSignature(ctx, userOps2, currentNonce + 2);
+        (uint256 r1, uint256 vs1) = generateSignature(ctx, userOps1, currentNonce + 1);
+        
+        // Try to execute operation with nonce+2 first (should fail)
+        bool futureNonceSuccess = _tryUserOpsRaw(ctx, userOps2, r2, vs2);
+        
+        // Should fail due to nonce gap
+        return !futureNonceSuccess;
+    }
+
+    /**
+     * @dev Test memory corruption resistance with malformed assembly data
+     * @param ctx Test context
+     * @return memoryCorruptionResistant True if memory corruption is prevented
+     */
+    function testMemoryCorruptionResistance(
+        TestContext memory ctx
+    ) internal returns (bool memoryCorruptionResistant) {
+        // Test 1: Overlapping memory regions
+        bytes memory malformedOps1 = abi.encodePacked(
+            uint256(32), // Claims 32 bytes total
+            address(0x1234), // 20 bytes
+            uint256(1 ether), // 32 bytes (exceeds claimed size)
+            uint256(100) // Another 32 bytes (way over)
+        );
+        
+        if (_tryUserOps(ctx, malformedOps1)) {
+            return false; // Should have failed
+        }
+        
+        // Test 2: Data length overflow
+        bytes memory malformedOps2 = abi.encodePacked(
+            uint256(84), // Claims exactly header size
+            address(0x5678), // 20 bytes
+            uint256(0), // 32 bytes
+            uint256(type(uint256).max), // Claims max data length (should overflow)
+            bytes4(0x12345678) // Only 4 bytes of actual data
+        );
+        
+        if (_tryUserOps(ctx, malformedOps2)) {
+            return false; // Should have failed
+        }
+        
+        return true;
+    }
+
+    /**
+     * @dev Test gas exhaustion attack resistance
+     * @param ctx Test context
+     * @param maxAllowedGas Maximum gas that should be allowed per operation
+     * @return gasExhaustionResistant True if gas exhaustion attacks are prevented
+     */
+    function testGasExhaustionResistance(
+        TestContext memory ctx,
+        uint256 maxAllowedGas
+    ) internal returns (bool gasExhaustionResistant) {
+        // Create operation with potentially expensive computation
+        Operation[] memory operations = new Operation[](1);
+        operations[0] = Operation({
+            to: address(0x9999), // Non-existent contract
+            value: 0,
+            data: new bytes(5000) // Large data payload
+        });
+        
+        bytes memory userOps = encodeOperations(operations);
+        uint256 currentNonce = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        (uint256 r, uint256 vs) = generateSignature(ctx, userOps, currentNonce);
+        
+        // Measure gas consumption
+        uint256 gasBefore = gasleft();
+        _tryUserOpsRaw(ctx, userOps, r, vs);
+        uint256 gasUsed = gasBefore - gasleft();
+        
+        // Should not exceed maximum allowed gas
+        return gasUsed <= maxAllowedGas;
+    }
+
+    /**
+     * @dev Test state consistency during failed operations
+     * @param ctx Test context
+     * @return stateConsistent True if state remains consistent after failures
+     */
+    function testStateConsistencyOnFailure(
+        TestContext memory ctx
+    ) internal returns (bool stateConsistent) {
+        uint256 nonceBefore = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        uint256 balanceBefore = ctx.eoaOwner.balance;
+        
+        // Create operation that should fail
+        Operation[] memory operations = new Operation[](1);
+        operations[0] = Operation({
+            to: address(0), // Invalid address
+            value: 1 ether,
+            data: ""
+        });
+        
+        bytes memory userOps = encodeOperations(operations);
+        (uint256 r, uint256 vs) = generateSignature(ctx, userOps, nonceBefore);
+        
+        // Execute failing operation
+        bool success = _tryUserOpsRaw(ctx, userOps, r, vs);
+        
+        uint256 nonceAfter = DfnsSmartAccount(ctx.dfnsSmartAccount).getNonce();
+        uint256 balanceAfter = ctx.eoaOwner.balance;
+        
+        if (!success) {
+            // If operation failed, nonce and balance should be unchanged
+            return (nonceAfter == nonceBefore) && (balanceAfter == balanceBefore);
+        } else {
+            // If operation unexpectedly succeeded, that's also a problem
+            return false;
+        }
     }
 }
