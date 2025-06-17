@@ -6,6 +6,21 @@ It uses no dependency and relies on some assembly code to save gas usage.
 
 The contract is intended to be used with EIP-7702 where EOA delegates to this contract implementation.
 
+It is deployed on the following chains:
+
+| Blockchain          | Contract Address                                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Ethereum Mainnet    | [0xbd77a32e628e69d8b168d3813f019e51d787b569](https://etherscan.io/address/0xbd77a32e628e69d8b168d3813f019e51d787b569#code)                  |
+| Ethereum Sepolia    | [0xbd77a32e628e69d8b168d3813f019e51d787b569](https://sepolia.etherscan.io/address/0xbd77a32e628e69d8b168d3813f019e51d787b569#code)          |
+| Ethereum Holesky    | [0xbd77a32e628e69d8b168d3813f019e51d787b569](https://holesky.etherscan.io/address/0xbd77a32e628e69d8b168d3813f019e51d787b569#code)          |
+| Base                | [0xbd77a32e628e69d8b168d3813f019e51d787b569](https://basescan.org/address/0xbd77a32e628e69d8b168d3813f019e51d787b569#code)                  |
+| Base Sepolia        | [0xbd77a32e628e69d8b168d3813f019e51d787b569](https://sepolia.basescan.org/address/0xbd77a32e628e69d8b168d3813f019e51d787b569#code)          |
+| Binance Smart Chain | [0xbd77a32e628e69d8b168d3813f019e51d787b569](https://bscscan.com/address/0xbd77a32e628e69d8b168d3813f019e51d787b569#code)                   |
+| Binance Testnet     | [0xbd77a32e628e69d8b168d3813f019e51d787b569](https://testnet.bscscan.com/address/0xbd77a32e628e69d8b168d3813f019e51d787b569#code)           |
+| Optimism            | [0xbd77a32e628e69d8b168d3813f019e51d787b569](https://optimistic.etherscan.io/address/0xbd77a32e628e69d8b168d3813f019e51d787b569#code)       |
+| Optimism Sepolia    | [0xbd77a32e628e69d8b168d3813f019e51d787b569](https://sepolia-optimism.etherscan.io/address/0xbd77a32e628e69d8b168d3813f019e51d787b569#code) |
+
+
 ## Foundry
 
 **Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
